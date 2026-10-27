@@ -1,0 +1,45 @@
+{
+  "name": "scribe-extension",
+  "displayName": "Playbook - 자동 매뉴얼 생성기",
+  "version": "0.3.0",
+  "description": "웹 클릭/입력 동작을 자동으로 캡처하여 한국어 단계별 가이드북을 생성하는 Chrome Extension",
+  "author": "jingyung.lee",
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package"
+  },
+  "dependencies": {
+    "plasmo": "0.89.4",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.0.263",
+    "@types/node": "^26.2.0",
+    "@types/react": "18.2.55",
+    "@types/react-dom": "18.2.19",
+    "typescript": "5.3.3"
+  },
+  "manifest": {
+    "host_permissions": [
+      "<all_urls>"
+    ],
+    "permissions": [
+      "activeTab",
+      "storage",
+      "tabs",
+      "unlimitedStorage",
+      "cookies"
+    ],
+    "commands": {
+      "toggle-recording": {
+        "suggested_key": {
+          "default": "Ctrl+Shift+E",
+          "mac": "Command+Shift+E"
+        },
+        "description": "녹화 시작/종료 토글"
+      }
+    }
+  }
+}
