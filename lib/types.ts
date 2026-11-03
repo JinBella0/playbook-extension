@@ -1,3 +1,5 @@
+import type { PageSnapshot } from "./snapshot"
+
 // 녹화 상태 및 이벤트 데이터 타입 정의
 // background(Service Worker) <-> content script <-> popup 간에 공유됩니다.
 
@@ -56,6 +58,8 @@ export interface StepData {
   element: ElementInfo
   /** 직전 단계 이후 화면에 새로 나타난 글자 (시연이 이 단계에서 무엇을 보여줬는지 설명하는 재료) */
   screenText?: string
+  /** 에이전틱OS 시연 녹화일 때 이 단계 화면 저장본의 id (RecordedSnapshots.pages의 키) */
+  snapshotId?: string
 }
 
 /** content script가 background로 보내는 원본 캡처 데이터 (id/order/screenshot은 background가 채움) */
@@ -79,12 +83,22 @@ export interface RecordingSession {
   createdAt: number
   finishedAt: number
   steps: StepData[]
+  /** 에이전틱OS 시연을 녹화했을 때 단계별 화면 저장본 (Use Case 화면 틀로 씀) */
+  snapshots?: RecordedSnapshots
   /** 대시보드(Supabase) 업로드 상태. 성공 시 dashboardId로 바로 이동 가능 */
   uploadStatus: UploadStatus
   dashboardId?: string
 }
 
+/** 녹화 중 단계별 화면 저장본. CSS·이미지(assets)는 단계끼리 같이 써서 한 번만 저장합니다 */
+export interface RecordedSnapshots {
+  assets: Record<string, string>
+  /** snapshotId -> 그 단계 화면 HTML */
+  pages: Record<string, string>
+}
+
 export const STORAGE_KEY_RECORDING_STATE = "recordingState"
+export const STORAGE_KEY_RECORDING_SNAPSHOTS = "recordingSnapshots"
 export const STORAGE_KEY_SESSIONS = "recordingSessions"
 
 export type ExtensionMessage =
@@ -99,6 +113,7 @@ export type ExtensionMessage =
   | { type: "DELETE_SESSION"; sessionId: string }
   | { type: "RETRY_UPLOAD"; sessionId: string }
   | { type: "SET_CONTROL_BAR_HIDDEN"; hidden: boolean }
+  | { type: "STEP_SNAPSHOT"; snapshotId: string; snapshot: PageSnapshot }
 
 export type ExtensionResponse =
   | { ok: true; state: RecordingState }

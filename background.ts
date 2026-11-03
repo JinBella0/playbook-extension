@@ -7,7 +7,9 @@ import type {
   StepCapturePayload,
   StepData
 } from "~lib/types"
-import { STORAGE_KEY_RECORDING_STATE, STORAGE_KEY_SESSIONS } from "~lib/types"
+import type { PageSnapshot } from "~lib/snapshot"
+import type { RecordedSnapshots } from "~lib/types"
+import { STORAGE_KEY_RECORDING_SNAPSHOTS, STORAGE_KEY_RECORDING_STATE, STORAGE_KEY_SESSIONS } from "~lib/types"
 
 const DEFAULT_STATE: RecordingState = {
   status: "idle",
@@ -55,6 +57,7 @@ async function updateBadge(state: RecordingState): Promise<void> {
 }
 
 async function handleStartRecording(): Promise<RecordingState> {
+  await clearSnapshots()
   const newState: RecordingState = {
     status: "recording",
     steps: [],
@@ -92,18 +95,82 @@ async function handleResumeRecording(): Promise<RecordingState> {
   return newState
 }
 
+const EMPTY_SNAPSHOTS: RecordedSnapshots = { assets: {}, pages: {} }
+
+async function getSnapshots(): Promise<RecordedSnapshots> {
+  const result = await chrome.storage.local.get(STORAGE_KEY_RECORDING_SNAPSHOTS)
+  return result[STORAGE_KEY_RECORDING_SNAPSHOTS] ?? EMPTY_SNAPSHOTS
+}
+
+async function setSnapshots(snapshots: RecordedSnapshots): Promise<void> {
+  await chrome.storage.local.set({ [STORAGE_KEY_RECORDING_SNAPSHOTS]: snapshots })
+}
+
+// 단계 화면 저장본은 빠르게 연달아 들어오므로, 읽고-쓰기가 서로 덮어쓰지 않게 한 줄로 세워 처리합니다
+let snapshotQueue: Promise<unknown> = Promise.resolve()
+
+function queueSnapshotWrite(work: () => Promise<void>): Promise<void> {
+  const next = snapshotQueue.then(work, work)
+  snapshotQueue = next.catch(() => undefined)
+  return next
+}
+
+/** 단계 화면 저장본 하나를 녹화 중 저장소에 더합니다 (녹화 중이 아니면 버림) */
+function handleStepSnapshot(snapshotId: string, snapshot: PageSnapshot): Promise<void> {
+  return queueSnapshotWrite(async () => {
+    const state = await getState()
+    if (state.status === "idle") return
+    const current = await getSnapshots()
+    await setSnapshots({
+      assets: { ...current.assets, ...snapshot.assets },
+      pages: { ...current.pages, [snapshotId]: snapshot.html }
+    })
+  })
+}
+
+const SNAPSHOT_WAIT_MS = 3_000
+
+/** 녹화에 쓰인 단계 화면 저장본만 꺼내고 저장소를 비웁니다 (없으면 undefined) */
+async function takeRecordedSnapshots(steps: StepData[]): Promise<RecordedSnapshots | undefined> {
+  // 마지막 단계 화면은 정리(이미지 받기)가 끝나기 전에 녹화가 끝날 수 있어, 잠깐 기다립니다
+  const wanted = steps.map((step) => step.snapshotId).filter((id): id is string => Boolean(id))
+  const deadline = Date.now() + SNAPSHOT_WAIT_MS
+  while (Date.now() < deadline) {
+    const { pages } = await getSnapshots()
+    if (wanted.every((id) => pages[id])) break
+    await new Promise((resolve) => setTimeout(resolve, 200))
+  }
+
+  let taken: RecordedSnapshots | undefined
+  return queueSnapshotWrite(async () => {
+    const current = await getSnapshots()
+    const pages: Record<string, string> = {}
+    for (const step of steps) {
+      if (step.snapshotId && current.pages[step.snapshotId]) pages[step.snapshotId] = current.pages[step.snapshotId]
+    }
+    taken = Object.keys(pages).length > 0 ? { assets: current.assets, pages } : undefined
+    await setSnapshots(EMPTY_SNAPSHOTS)
+  }).then(() => taken)
+}
+
+function clearSnapshots(): Promise<void> {
+  return queueSnapshotWrite(() => setSnapshots(EMPTY_SNAPSHOTS))
+}
+
 /** 녹화를 종료하고, 수집된 steps를 완료된 매뉴얼 세션으로 Local Storage에 확정 저장합니다 */
 async function handleStopRecording(): Promise<RecordingState> {
   const current = await getState()
 
   if (current.status !== "idle" && current.steps.length > 0) {
     const finishedAt = Date.now()
+    const snapshots = await takeRecordedSnapshots(current.steps)
     const session: RecordingSession = {
       id: crypto.randomUUID(),
       title: `매뉴얼 ${new Date(finishedAt).toLocaleString("ko-KR")}`,
       createdAt: current.startedAt ?? finishedAt,
       finishedAt,
       steps: current.steps,
+      snapshots,
       uploadStatus: "uploading"
     }
     const sessions = await getSessions()
@@ -133,6 +200,7 @@ async function handleStopRecording(): Promise<RecordingState> {
 
 /** 저장하지 않고 현재 녹화 중인 내용을 폐기합니다 */
 async function handleDiscardRecording(): Promise<RecordingState> {
+  await clearSnapshots()
   const newState: RecordingState = { status: "idle", steps: [] }
   await setState(newState)
   await updateBadge(newState)
@@ -173,7 +241,7 @@ async function uploadSessionToDashboard(session: RecordingSession): Promise<Uplo
         "Content-Type": "application/json",
         Authorization: `Bearer ${accessToken}`
       },
-      body: JSON.stringify({ title: session.title, steps: session.steps })
+      body: JSON.stringify({ title: session.title, steps: session.steps, snapshots: session.snapshots })
     })
     if (response.status === 401) return { ok: false, reason: "unauthorized" }
     if (!response.ok) return { ok: false, reason: "error" }
@@ -313,6 +381,11 @@ chrome.runtime.onMessage.addListener(
           case "CAPTURE_STEP": {
             const state = await handleCaptureStep(message.payload, sender.tab?.windowId)
             sendResponse({ ok: true, state })
+            return
+          }
+          case "STEP_SNAPSHOT": {
+            await handleStepSnapshot(message.snapshotId, message.snapshot)
+            sendResponse({ ok: true, state: await getState() })
             return
           }
           case "GET_SESSIONS": {

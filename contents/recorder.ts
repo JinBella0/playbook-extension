@@ -1,6 +1,7 @@
 import type { PlasmoCSConfig } from "plasmo"
 
 import { buildSelector, getElementText } from "~lib/selector"
+import { cloneCurrentPage, finishSnapshot, isAgenticOsPage } from "~lib/snapshot"
 import type {
   Coordinates,
   ElementInfo,
@@ -119,13 +120,23 @@ function buildElementInfo(target: Element, extra?: Partial<ElementInfo>): Elemen
 }
 
 function sendCaptureStep(payload: StepCapturePayload) {
+  // 에이전틱OS 시연이면 이 순간의 화면을 바로 복제해 둡니다 (Use Case PPT에서 이 단계 장면의 화면 틀로 씀)
+  const snapshotId = isAgenticOsPage() ? crypto.randomUUID() : undefined
+  const clone = snapshotId ? cloneCurrentPage() : null
+
   const message: ExtensionMessage = {
     type: "CAPTURE_STEP",
-    payload: { ...payload, screenText: takeNewScreenText() }
+    payload: { ...payload, screenText: takeNewScreenText(), snapshotId }
   }
   chrome.runtime.sendMessage(message).catch((error) => {
     console.error("[playbook] 이벤트 전송 실패:", error)
   })
+
+  if (snapshotId && clone) {
+    finishSnapshot(clone)
+      .then((snapshot) => chrome.runtime.sendMessage({ type: "STEP_SNAPSHOT", snapshotId, snapshot } satisfies ExtensionMessage))
+      .catch((error) => console.error("[playbook] 화면 저장 실패:", error))
+  }
 }
 
 function handleClick(event: MouseEvent) {
@@ -257,3 +268,4 @@ window.addEventListener("keydown", handleKeydown, { capture: true })
 document.addEventListener("contextmenu", handleContextMenu, { capture: true })
 document.addEventListener("dragstart", handleDragStart, { capture: true })
 document.addEventListener("drop", handleDrop, { capture: true })
+
