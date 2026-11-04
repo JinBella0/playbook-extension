@@ -1,7 +1,7 @@
 {
   "name": "scribe-extension",
   "displayName": "Playbook - 녹화로 끝나는 업무 매뉴얼",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "클릭 한 번 녹화로 끝나는 업무 매뉴얼. 클릭과 입력을 화면과 함께 기록하고, AI가 단계별 설명까지 써 드려요.",
   "author": "jingyung.lee",
   "scripts": {

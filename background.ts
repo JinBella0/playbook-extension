@@ -234,14 +234,63 @@ async function uploadSessionToDashboard(session: RecordingSession): Promise<Uplo
   try {
     const accessToken = await getDashboardAccessToken()
     if (!accessToken) return { ok: false, reason: "unauthorized" }
+    const authHeaders = { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` }
 
+    // 1) 대시보드 서버는 요청 하나에 4.5MB까지만 받으므로(넘으면 413), 무거운 스크린샷·화면 저장본은
+    //    서명된 주소를 받아 Storage에 직접 올리고 서버에는 주소만 보냅니다
+    const blobs = new Map<string, Blob>()
+    for (const step of session.steps) {
+      if (step.screenshot.startsWith("data:")) blobs.set(step.id, await (await fetch(step.screenshot)).blob())
+    }
+    const hasSnapshots = !!session.snapshots && Object.keys(session.snapshots.pages).length > 0
+
+    const urlsResponse = await fetch(`${DASHBOARD_URL}/api/sessions/upload-urls`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        screenshots: [...blobs].map(([stepId, blob]) => ({ stepId, contentType: blob.type || "image/jpeg" })),
+        snapshots: hasSnapshots
+      })
+    })
+    if (urlsResponse.status === 401) return { ok: false, reason: "unauthorized" }
+    if (!urlsResponse.ok) return { ok: false, reason: "error" }
+    const urls: {
+      sessionId: string
+      screenshots: Record<string, { signedUrl: string; publicUrl: string }>
+      snapshot: { signedUrl: string } | null
+    } = await urlsResponse.json()
+
+    const put = async (signedUrl: string, body: Blob, contentType: string) => {
+      const response = await fetch(signedUrl, {
+        method: "PUT",
+        headers: { "Content-Type": contentType, "x-upsert": "true" },
+        body
+      })
+      if (!response.ok) throw new Error(`Storage 업로드 실패 (${response.status})`)
+    }
+    await Promise.all(
+      [...blobs].map(([stepId, blob]) => put(urls.screenshots[stepId].signedUrl, blob, blob.type || "image/jpeg"))
+    )
+    if (hasSnapshots && urls.snapshot) {
+      const gzipped = new Blob([JSON.stringify(session.snapshots)])
+        .stream()
+        .pipeThrough(new CompressionStream("gzip"))
+      await put(urls.snapshot.signedUrl, await new Response(gzipped).blob(), "application/gzip")
+    }
+
+    // 2) 주소로 바뀐 단계 정보만 보내 세션을 만듭니다
+    const steps = session.steps.map((step) =>
+      urls.screenshots[step.id] ? { ...step, screenshot: urls.screenshots[step.id].publicUrl } : step
+    )
     const response = await fetch(`${DASHBOARD_URL}/api/sessions`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`
-      },
-      body: JSON.stringify({ title: session.title, steps: session.steps, snapshots: session.snapshots })
+      headers: authHeaders,
+      body: JSON.stringify({
+        id: urls.sessionId,
+        title: session.title,
+        steps,
+        snapshotsUploaded: hasSnapshots && !!urls.snapshot
+      })
     })
     if (response.status === 401) return { ok: false, reason: "unauthorized" }
     if (!response.ok) return { ok: false, reason: "error" }
