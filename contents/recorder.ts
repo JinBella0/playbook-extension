@@ -139,8 +139,17 @@ function sendCaptureStep(payload: StepCapturePayload) {
   }
 }
 
+/**
+ * Playbook 컨트롤 바(녹화 중 / 일시정지 / 녹화 완료)를 누른 것인지.
+ * 컨트롤 바는 Plasmo가 만든 <plasmo-csui> 안(Shadow DOM)에 있어, 이벤트 경로에 그 껍데기 요소가 들어 있습니다.
+ * 이 클릭까지 단계로 찍으면 '녹화 완료'와 '단계 추가'가 동시에 처리되면서 녹화가 안 멈출 수 있습니다
+ */
+function isOwnControl(event: Event): boolean {
+  return event.composedPath().some((node) => node instanceof Element && node.tagName === "PLASMO-CSUI")
+}
+
 function handleClick(event: MouseEvent) {
-  if (!isRecording) return
+  if (!isRecording || isOwnControl(event)) return
 
   const target = event.target as Element | null
   if (!target) return
@@ -156,7 +165,7 @@ function handleClick(event: MouseEvent) {
 }
 
 function handleChange(event: Event) {
-  if (!isRecording) return
+  if (!isRecording || isOwnControl(event)) return
 
   const target = event.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | null
   if (!target) return
@@ -191,7 +200,7 @@ function isEditableElement(element: Element): boolean {
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (!isRecording || event.repeat) return
+  if (!isRecording || event.repeat || isOwnControl(event)) return
 
   const target = event.target as Element | null
   if (!target) return
@@ -215,7 +224,7 @@ function handleKeydown(event: KeyboardEvent) {
 }
 
 function handleContextMenu(event: MouseEvent) {
-  if (!isRecording) return
+  if (!isRecording || isOwnControl(event)) return
 
   const target = event.target as Element | null
   if (!target) return

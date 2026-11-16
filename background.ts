@@ -57,6 +57,8 @@ async function updateBadge(state: RecordingState): Promise<void> {
 }
 
 async function handleStartRecording(): Promise<RecordingState> {
+  // 직전 녹화의 화면 저장본을 아직 꺼내는 중이면, 비우기 전에 기다립니다
+  await snapshotTaking
   await clearSnapshots()
   const newState: RecordingState = {
     status: "recording",
@@ -157,45 +159,66 @@ function clearSnapshots(): Promise<void> {
   return queueSnapshotWrite(() => setSnapshots(EMPTY_SNAPSHOTS))
 }
 
-/** 녹화를 종료하고, 수집된 steps를 완료된 매뉴얼 세션으로 Local Storage에 확정 저장합니다 */
+/** 녹화 완료를 처리하는 중인지. 완료 버튼을 여러 번 눌러도 한 번만 처리합니다 */
+let stopping = false
+/** 직전 녹화의 화면 저장본을 꺼내는 중이면 그 작업. 새 녹화가 저장본을 비우기 전에 기다립니다 */
+let snapshotTaking: Promise<unknown> = Promise.resolve()
+
+/**
+ * 녹화를 종료하고, 수집된 steps를 완료된 매뉴얼 세션으로 Local Storage에 확정 저장합니다.
+ * 업로드는 몇 초 걸리므로, 녹화 상태는 먼저 끝내(컨트롤 바가 바로 사라짐) 사용자가 다시 누르거나
+ * 그사이 클릭이 단계로 찍히지 않게 합니다
+ */
 async function handleStopRecording(): Promise<RecordingState> {
-  const current = await getState()
-
-  if (current.status !== "idle" && current.steps.length > 0) {
-    const finishedAt = Date.now()
-    const snapshots = await takeRecordedSnapshots(current.steps)
-    const session: RecordingSession = {
-      id: crypto.randomUUID(),
-      title: `매뉴얼 ${new Date(finishedAt).toLocaleString("ko-KR")}`,
-      createdAt: current.startedAt ?? finishedAt,
-      finishedAt,
-      steps: current.steps,
-      snapshots,
-      uploadStatus: "uploading"
+  if (stopping) return getState()
+  stopping = true
+  try {
+    // 완료 직전에 누른 클릭의 단계가 찍히는 중이면 마저 기다립니다
+    await Promise.allSettled([...capturesInFlight])
+    const current = await getState()
+    const idle: RecordingState = { status: "idle", steps: [] }
+    await setState(idle)
+    await updateBadge(idle)
+    if (current.status !== "idle" && current.steps.length > 0) {
+      const snapshots = takeRecordedSnapshots(current.steps)
+      snapshotTaking = snapshots.catch(() => undefined)
+      await saveAndUpload(current, await snapshots)
     }
-    const sessions = await getSessions()
-    await setSessions([session, ...sessions])
-
-    const result = await uploadSessionToDashboard(session)
-    await patchSession(
-      session.id,
-      result.ok
-        ? { uploadStatus: "uploaded", dashboardId: result.dashboardId }
-        : { uploadStatus: result.reason === "unauthorized" ? "unauthorized" : "failed" }
-    )
-
-    // 녹화 완료 -> 결과 페이지로 자동 이동 (기획: 녹화 종료 후 대시보드로 이동해 확인/수정)
-    if (result.ok) {
-      await chrome.tabs.create({ url: `${DASHBOARD_URL}/manual/${result.dashboardId}` })
-    } else if (result.reason === "unauthorized") {
-      await chrome.tabs.create({ url: `${DASHBOARD_URL}/login` })
-    }
+    return idle
+  } finally {
+    stopping = false
   }
+}
 
-  const newState: RecordingState = { status: "idle", steps: [] }
-  await setState(newState)
-  await updateBadge(newState)
-  return newState
+/** 끝난 녹화를 세션으로 저장하고 대시보드에 올린 뒤, 결과 페이지(또는 로그인 페이지)를 엽니다 */
+async function saveAndUpload(current: RecordingState, snapshots: RecordedSnapshots | undefined) {
+  const finishedAt = Date.now()
+  const session: RecordingSession = {
+    id: crypto.randomUUID(),
+    title: `매뉴얼 ${new Date(finishedAt).toLocaleString("ko-KR")}`,
+    createdAt: current.startedAt ?? finishedAt,
+    finishedAt,
+    steps: current.steps,
+    snapshots,
+    uploadStatus: "uploading"
+  }
+  const sessions = await getSessions()
+  await setSessions([session, ...sessions])
+
+  const result = await uploadSessionToDashboard(session)
+  await patchSession(
+    session.id,
+    result.ok
+      ? { uploadStatus: "uploaded", dashboardId: result.dashboardId }
+      : { uploadStatus: result.reason === "unauthorized" ? "unauthorized" : "failed" }
+  )
+
+  // 녹화 완료 -> 결과 페이지로 자동 이동 (기획: 녹화 종료 후 대시보드로 이동해 확인/수정)
+  if (result.ok) {
+    await chrome.tabs.create({ url: `${DASHBOARD_URL}/manual/${result.dashboardId}` })
+  } else if (result.reason === "unauthorized") {
+    await chrome.tabs.create({ url: `${DASHBOARD_URL}/login` })
+  }
 }
 
 /** 저장하지 않고 현재 녹화 중인 내용을 폐기합니다 */
@@ -361,8 +384,8 @@ async function appendCapturedStep(
   partial: Omit<StepData, "id" | "order" | "screenshot">,
   windowIdForCapture: number
 ): Promise<RecordingState> {
-  const current = await getState()
-  if (current.status !== "recording") return current
+  const before = await getState()
+  if (before.status !== "recording" || stopping) return before
 
   let screenshot = ""
   try {
@@ -370,6 +393,12 @@ async function appendCapturedStep(
   } catch (error) {
     console.error("[playbook] 스크린샷 캡처 실패:", error)
   }
+
+  // 화면을 찍는 동안 녹화가 끝났거나 새 녹화가 시작됐으면 이 단계는 버립니다.
+  // (예전 상태를 그대로 덮어쓰면, 이미 끝난 녹화가 다시 "녹화 중"으로 되살아남)
+  // 같은 녹화면 그사이 추가된 단계를 잃지 않도록 지금 상태에 이어 붙입니다
+  const current = await getState()
+  if (current.status !== "recording" || current.startedAt !== before.startedAt) return current
 
   const step: StepData = {
     ...partial,
@@ -384,12 +413,21 @@ async function appendCapturedStep(
   return newState
 }
 
+/** 진행 중인 단계 캡처들. 녹화 완료 시 마지막 클릭의 단계가 다 찍힐 때까지 기다리는 데 씁니다 */
+const capturesInFlight = new Set<Promise<unknown>>()
+
 async function handleCaptureStep(
   payload: StepCapturePayload,
   senderWindowId: number | undefined
 ): Promise<RecordingState> {
   if (senderWindowId === undefined) return getState()
-  return appendCapturedStep(payload, senderWindowId)
+  const capture = appendCapturedStep(payload, senderWindowId)
+  capturesInFlight.add(capture)
+  try {
+    return await capture
+  } finally {
+    capturesInFlight.delete(capture)
+  }
 }
 
 chrome.runtime.onMessage.addListener(
