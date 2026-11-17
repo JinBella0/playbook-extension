@@ -547,7 +547,12 @@ chrome.commands.onCommand.addListener((command) => {
   }
 })
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener((details) => {
   console.log("[playbook] Extension installed. 초기 상태를 설정합니다.")
   setState(DEFAULT_STATE)
+  // 처음 설치했을 때만 로그인 화면을 엽니다 (업데이트 때는 열지 않음).
+  // 로그인하면 대시보드 홈으로 가고, 거기서 처음 한 번 둘러보기 안내가 뜹니다. 이미 로그인돼 있으면 바로 홈으로 넘어갑니다
+  if (details.reason === chrome.runtime.OnInstalledReason.INSTALL) {
+    chrome.tabs.create({ url: `${DASHBOARD_URL}/login` })
+  }
 })
